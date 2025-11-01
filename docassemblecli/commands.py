@@ -837,7 +837,7 @@ def dacreate():
             version = "0.0.1"
     package_data = {'build-system': {'requires': ['setuptools==80.9.0'], 'build-backend': 'setuptools.build_meta'}, 'project': {'name': f'docassemble.{pkgname}', 'version': version, 'description': description, 'readme': 'README.md', 'authors': [{'name': developer_name, 'email': developer_email}], 'dependencies': [], 'urls': {'Homepage': package_url}}, 'tool': {'setuptools': {'packages': {'find': {'where': ['.']}}}}}
     if license_txt != '':
-        package_data.update({'license': str(license_txt), 'license-files': ['LICENSE']})
+        package_data['project'].update({'license': str(license_txt), 'license-files': ['LICENSE']})
     pyprojecttoml = tomli_w.dumps(package_data)
     if 'MIT' in license_txt:
         license_content = 'The MIT License (MIT)\n\nCopyright (c) ' + str(datetime.datetime.now().year) + ' ' + developer_name + """
@@ -883,6 +883,7 @@ en
 .flake8
 *.swp
 *.tmp
+*.tmp.*
 .DS_Store
 .envrc
 .env
