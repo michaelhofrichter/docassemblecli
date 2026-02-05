@@ -517,7 +517,12 @@ def dainstall():
         #     do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'])
         #     full_install_done = True
         sys.stdout.write("Watching " + package_name + " for changes.\n")
-        loop = asyncio.get_event_loop()
+        # Python 3.10+ requires explicit event loop creation
+        if sys.version_info >= (3, 10):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        else:
+            loop = asyncio.get_event_loop()
         queue = asyncio.Queue()
         futures = [
             loop.run_in_executor(None, watch, Path(args.directory), queue, loop, data, True),
