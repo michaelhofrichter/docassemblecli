@@ -20,6 +20,7 @@ import asyncio
 import signal
 import hashlib
 from pathlib import Path
+import urllib3
 
 IGNORE_REGEXES = ['.*/\.git$', '.*/\.git/.*', '.*~$', '.*/\.?\#.*', '.*/\.?flycheck_.*', '.*__pycache__.*', '.*/\.mypy_cache/.*', '.*\.egg-info.*', '.*\.py[cod]$', '.*\$py\.class$', '.*\.swp$', '.*/build/.*', '.*\.tmp$', '.*\#$', '.*/\.~.*', '.*/~.*', '.*\.swx$', '.*\.tmp\..*']
 IGNORE_DIRS = ['.git', '__pycache__', '.mypy_cache', '.venv', '.history', 'build']
@@ -32,6 +33,13 @@ if os.sep == '\\':
 observer = None
 full_install_done = False
 checksums = {}  # type: ignore[var-annotated]
+ssl_warnings_disabled = False
+
+def disable_ssl_warnings():
+    global ssl_warnings_disabled
+    if not ssl_warnings_disabled:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        ssl_warnings_disabled = True
 
 def checksum_is_same(path):
     path = os.path.abspath(path)
@@ -186,7 +194,7 @@ async def handle_event_after_delay(queue, to_do, data):
                             break
                 if other_files_involved:
                     try:
-                        do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'])
+                        do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'], data['verify_ssl'])
                     except TerminalException as err:
                         sys.stderr.write("Install failed: " + str(err) + "\n")
                 else:
@@ -201,14 +209,14 @@ async def handle_event_after_delay(queue, to_do, data):
                                 if data['args'].project and data['args'].project != 'default':
                                     post_data['project'] = data['args'].project
                                 try:
-                                    r = requests.post(data['apiurl'] + '/api/playground', data=post_data, files={'file': open(file_path, 'rb')}, headers={'X-API-Key': data['apikey']}, timeout=50)
+                                    r = requests.post(data['apiurl'] + '/api/playground', data=post_data, files={'file': open(file_path, 'rb')}, headers={'X-API-Key': data['apikey']}, timeout=50, verify=data['verify_ssl'])
                                     if r.status_code == 200:
                                         try:
                                             info = r.json()
                                         except:
                                             raise TerminalException("Server did not return JSON: " + r.text)
                                         task_id = info['task_id']
-                                        success = wait_for_server(True, task_id, data['apikey'], data['apiurl'])
+                                        success = wait_for_server(True, task_id, data['apikey'], data['apiurl'], data['verify_ssl'])
                                         if not success:
                                             sys.stderr.write("Failed to upload " + file_path + ". Restart process did not return a success code.\n")
                                     elif r.status_code == 204:
@@ -238,7 +246,7 @@ async def handle_event_after_delay(queue, to_do, data):
                             if manual_mode:
                                 sys.stdout.write("Doing an initial upload of the whole package to make sure the current version of the package exists in the Playground. Subsequent uploads will be incremental.\n")
                             sys.stdout.flush()
-                        do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'])
+                        do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'], data['verify_ssl'])
                         full_install_done = True
                         debug_log(data['args'], "Finished the full install.")
                     except TerminalException as err:
@@ -299,17 +307,18 @@ def save_dotfile(dotfile, env):
     return True
 
 
-def add_or_update_env(env, apiurl, apikey):
+def add_or_update_env(env, apiurl, apikey, verify_ssl=True):
     apiname = name_from_url(apiurl)
     found = False
     for item in env:
         if item.get('name', None) == apiname:
             item['apiurl'] = apiurl
             item['apikey'] = apikey
+            item['verify_ssl'] = verify_ssl
             found = True
             break
     if not found:
-        env.append({'apiurl': apiurl, 'apikey': apikey, 'name': apiname})
+        env.append({'apiurl': apiurl, 'apikey': apikey, 'name': apiname, 'verify_ssl': verify_ssl})
 
 
 def name_from_url(url):
@@ -318,7 +327,7 @@ def name_from_url(url):
     return name
 
 
-def wait_for_server(playground:bool, task_id, apikey, apiurl):
+def wait_for_server(playground:bool, task_id, apikey, apiurl, verify_ssl=True):
     if playground:
         sys.stdout.write("Waiting for server to restart.")
     else:
@@ -338,7 +347,7 @@ def wait_for_server(playground:bool, task_id, apikey, apiurl):
         else:
             full_url = apiurl + '/api/package_update_status'
         try:
-            r = requests.get(full_url, params={'task_id': task_id}, headers={'X-API-Key': apikey}, timeout=6)
+            r = requests.get(full_url, params={'task_id': task_id}, headers={'X-API-Key': apikey}, timeout=6, verify=verify_ssl)
         except requests.exceptions.Timeout:
             sys.stdout.write(".")
             sys.stdout.flush()
@@ -394,6 +403,7 @@ def dainstall():
     parser.add_argument("--project", help="install into a specific project in the Playground")
     parser.add_argument("--add", help="add another server to the .docassemblecli config file", action="store_true")
     parser.add_argument("--noconfig", help="do not use the .docassemblecli config file", action="store_true")
+    parser.add_argument("--no-ssl", help="do not verify SSL certificates (insecure, use only for development)", action="store_true", dest="no_ssl")
     parser.add_argument("--debug", help="use verbose logging", action="store_true")
     args = parser.parse_args()
     if args.norestart and args.force_restart:
@@ -489,12 +499,19 @@ def dainstall():
         raw_ignore = []
     to_ignore = [path.rstrip('/') for path in raw_ignore]
     package_name = os.path.basename(os.path.abspath(args.directory))
+    # Command-line flag takes precedence over config file
+    if args.no_ssl:
+        verify_ssl = False
+    else:
+        verify_ssl = selected_env.get('verify_ssl', True)
+    if not verify_ssl:
+        disable_ssl_warnings()
     try:
-        test_connection(args.playground, apiurl, apikey)
+        test_connection(args.playground, apiurl, apikey, verify_ssl)
     except Exception as e:
         return("Unable to connect to server. " + str(e))
     if args.watch:
-        data = {"args": args, "apikey": apikey, "apiurl": apiurl, "to_ignore": [os.path.abspath(os.path.join(args.directory, item)) for item in to_ignore], 'ignore_regexes': IGNORE_REGEXES, 'trim': 1 + len(os.path.abspath(args.directory))}
+        data = {"args": args, "apikey": apikey, "apiurl": apiurl, "verify_ssl": verify_ssl, "to_ignore": [os.path.abspath(os.path.join(args.directory, item)) for item in to_ignore], 'ignore_regexes': IGNORE_REGEXES, 'trim': 1 + len(os.path.abspath(args.directory))}
         # if args.playground:
         #     sys.stdout.write("Doing an initial upload of " + package_name + " to make sure the package is uploaded to the Playground. Subsequent uploads will be incremental.\n")
         #     do_install(data['args'], data['apikey'], data['apiurl'], data['to_ignore'])
@@ -524,7 +541,7 @@ def dainstall():
         sys.stdout.write("\n")
         return(0)
     try:
-        do_install(args, apikey, apiurl, to_ignore)
+        do_install(args, apikey, apiurl, to_ignore, verify_ssl)
     except TerminalException as err:
         return(str(err))
     return(0)
@@ -539,6 +556,7 @@ def dauninstall():
     parser.add_argument("--norestart", help="do not restart the docassemble server after installing package (only applicable in single-server environments)", action="store_true")
     parser.add_argument("--server", help="use a particular server from the .docassemblecli config file")
     parser.add_argument("--noconfig", help="do not use the .docassemblecli config file", action="store_true")
+    parser.add_argument("--no-ssl", help="do not verify SSL certificates (insecure, use only for development)", action="store_true", dest="no_ssl")
     parser.add_argument("--debug", help="use verbose logging", action="store_true")
     args = parser.parse_args()
     used_input = False
@@ -595,39 +613,46 @@ def dauninstall():
         add_or_update_env(env, apiurl, apikey)
         if save_dotfile(dotfile, env):
             sys.stdout.write("Saved base URL and API key to .docassemblecli as server " + name_from_url(apiurl) + "\n")
+    # Command-line flag takes precedence over config file
+    if args.no_ssl:
+        verify_ssl = False
+    else:
+        verify_ssl = selected_env.get('verify_ssl', True)
+    if not verify_ssl:
+        disable_ssl_warnings()
     try:
-        test_connection(False, apiurl, apikey)
+        test_connection(False, apiurl, apikey, verify_ssl)
     except Exception as e:
         return("Unable to connect to server. " + str(e))
     data = {'package': args.package}
     if args.norestart:
         data['restart'] = '0'
     try:
-        r = requests.delete(apiurl + '/api/package', params=data, headers={'X-API-Key': apikey}, timeout=50)
+        r = requests.delete(apiurl + '/api/package', params=data, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if r.status_code != 200:
             raise TerminalException("package DELETE returned " + str(r.status_code) + ": " + r.text)
         info = r.json()
         task_id = info['task_id']
-        if wait_for_server(False, task_id, apikey, apiurl):
+        if wait_for_server(False, task_id, apikey, apiurl, verify_ssl):
             sys.stdout.write("\nUninstalled.\n")
     except TerminalException as err:
         return(str(err))
     return(0)
 
-def test_connection(playground, apiurl, apikey):
-    general_test_response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50)
+def test_connection(playground, apiurl, apikey, verify_ssl=True):
+    general_test_response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
     if general_test_response.status_code == 403:
         raise RuntimeError("Please verify the validity of your API-Key.")
     if general_test_response.status_code != 200:
         raise RuntimeError(f"Server responded with status code {general_test_response.status_code}.")
     if not playground:
         return
-    playground_test_response = requests.get(apiurl + '/api/playground/project', headers={'X-API-Key': apikey}, timeout=50)
+    playground_test_response = requests.get(apiurl + '/api/playground/project', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
     if playground_test_response.status_code != 200:
         raise RuntimeError("Please check if 'enable playground' is set to 'True' in server configuration.")
     return
 
-def do_install(args, apikey, apiurl, to_ignore):
+def do_install(args, apikey, apiurl, to_ignore, verify_ssl=True):
     archive = tempfile.NamedTemporaryFile(suffix=".zip")
     zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode='w')
     root_directory = None
@@ -686,7 +711,7 @@ def do_install(args, apikey, apiurl, to_ignore):
     elif args.force_restart or has_python_files:
         should_restart = True
     elif len(dependencies) > 0 or this_package_name:
-        r = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50)
+        r = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if r.status_code != 200:
             raise TerminalException("/api/package returned " + str(r.status_code) + ": " + r.text)
         installed_packages = r.json()
@@ -721,17 +746,17 @@ def do_install(args, apikey, apiurl, to_ignore):
         if args.project and args.project != 'default':
             data['project'] = args.project
         project_endpoint = apiurl + '/api/playground/project'
-        project_list = requests.get(project_endpoint, headers={'X-API-Key': apikey}, timeout=50)
+        project_list = requests.get(project_endpoint, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if project_list.status_code == 200:
             if not args.project in project_list:
                 try:
-                    requests.post(project_endpoint, data={'project': args.project}, headers={'X-API-Key': apikey}, timeout=50)
+                    requests.post(project_endpoint, data={'project': args.project}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
                 except:
                     raise TerminalException("create project POST failed")
         else:
             sys.stdout.write("\n")
             raise TerminalException("playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text)
-        r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50)
+        r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if r.status_code == 400:
             try:
                 error_message = r.json()
@@ -739,18 +764,18 @@ def do_install(args, apikey, apiurl, to_ignore):
                 error_message = ''
             if 'project' not in data or error_message != 'Invalid project.':
                 raise TerminalException('playground_install POST returned ' + str(r.status_code) + ": " + r.text)
-            r = requests.post(apiurl + '/api/playground/project', data={'project': data['project']}, headers={'X-API-Key': apikey}, timeout=50)
+            r = requests.post(apiurl + '/api/playground/project', data={'project': data['project']}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
             if r.status_code != 204:
                 raise TerminalException("needed to create playground project but POST to api/playground/project returned " + str(r.status_code) + ": " + r.text)
             archive.seek(0)
-            r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50)
+            r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if r.status_code == 200:
             try:
                 info = r.json()
             except:
                 raise TerminalException(r.text)
             task_id = info['task_id']
-            success = wait_for_server(args.playground, task_id, apikey, apiurl)
+            success = wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl)
         elif r.status_code == 204:
             success = True
         else:
@@ -762,15 +787,15 @@ def do_install(args, apikey, apiurl, to_ignore):
         else:
             raise TerminalException("\nInstall failed\n")
     else:
-        r = requests.post(apiurl + '/api/package', data=data, files={'zip': archive}, headers={'X-API-Key': apikey}, timeout=50)
+        r = requests.post(apiurl + '/api/package', data=data, files={'zip': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
         if r.status_code != 200:
             raise TerminalException("package POST returned " + str(r.status_code) + ": " + r.text)
         info = r.json()
         task_id = info['task_id']
-        if wait_for_server(args.playground, task_id, apikey, apiurl):
+        if wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl):
             sys.stdout.write("\nInstalled.\n")
         if not should_restart:
-            r = requests.post(apiurl + '/api/clear_cache', headers={'X-API-Key': apikey}, timeout=50)
+            r = requests.post(apiurl + '/api/clear_cache', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
             if r.status_code != 204:
                 raise TerminalException("clear_cache returned " + str(r.status_code) + ": " + r.text)
 
@@ -1037,6 +1062,7 @@ def dadownload():
     parser.add_argument("--project", help="download from a specific project in the Playground")
     parser.add_argument("--add", help="add another server to the .docassemblecli config file", action="store_true")
     parser.add_argument("--noconfig", help="do not use the .docassemblecli config file", action="store_true")
+    parser.add_argument("--no-ssl", help="do not verify SSL certificates (insecure, use only for development)", action="store_true", dest="no_ssl")
     args = parser.parse_args()
     if args.project and not args.playground:
         return("The --project option can only be used with --playground.")
@@ -1113,6 +1139,13 @@ def dadownload():
         add_or_update_env(env, apiurl, apikey)
         if save_dotfile(dotfile, env):
             sys.stdout.write("Saved base URL and API key to .docassemblecli as server " + name_from_url(apiurl) + "\n")
+    # Command-line flag takes precedence over config file
+    if args.no_ssl:
+        verify_ssl = False
+    else:
+        verify_ssl = selected_env.get('verify_ssl', True)
+    if not verify_ssl:
+        disable_ssl_warnings()
     package_name = re.sub(r'^docassemble-', 'docassemble.', args.package)
     if not package_name.startswith('docassemble.'):
         package_name = 'docassemble.' + package_name
@@ -1123,7 +1156,7 @@ def dadownload():
         if args.project:
             params['project'] = args.project
         try:
-            with requests.get(apiurl + '/api/playground', params=params, stream=True, timeout=60, headers={'X-API-Key': apikey}) as r:
+            with requests.get(apiurl + '/api/playground', params=params, stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
                 if r.status_code == 404:
                     return("Package not found.")
                 r.raise_for_status()
@@ -1136,7 +1169,7 @@ def dadownload():
         zip_file_number = None
         found = False
         try:
-            response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50)
+            response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
             assert response.status_code == 200
         except:
             return("Unable to connect to server.")
@@ -1151,7 +1184,7 @@ def dadownload():
         if zip_file_number is None:
             return("Package installed but is not downloadable.")
         try:
-            with requests.get(apiurl + '/api/file/' + str(zip_file_number), stream=True, timeout=60, headers={'X-API-Key': apikey}) as r:
+            with requests.get(apiurl + '/api/file/' + str(zip_file_number), stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
                 r.raise_for_status()
                 with open(archive.name, 'wb') as fp:
                     for chunk in r.iter_content(8192):

@@ -147,7 +147,7 @@ You can run `dainstall --help` to get more information about how
 
     usage: dainstall [-h] [--apiurl APIURL] [--apikey APIKEY] [--norestart]
                      [--watch] [--force-restart] [--server SERVER] [--playground]
-                     [--project PROJECT] [--add] [--noconfig] [--debug]
+                     [--project PROJECT] [--add] [--noconfig] [--no-ssl] [--debug]
                      [directory]
 
     positional arguments:
@@ -170,6 +170,8 @@ You can run `dainstall --help` to get more information about how
       --project PROJECT  install into a specific project in the Playground
       --add              add another server to the .docassemblecli config file
       --noconfig         do not use the .docassemblecli config file
+      --no-ssl           do not verify SSL certificates (insecure, use only for
+                         development)
       --debug            use verbose logging
 
 For example, you might want to pass the URL and API key in the command
@@ -251,13 +253,51 @@ Thus, for the fastest development experience, use `--watch` and
 If you encounter problems, try running dainstall with the `--debug`
 option.
 
+#### Disabling SSL Certificate Verification
+
+If your **docassemble** server uses a self-signed certificate or you
+don't have a valid SSL certificate configured, you may encounter SSL
+verification errors when using `dainstall`. You can disable SSL
+certificate verification in two ways:
+
+**Option 1: Using the `--no-ssl` command-line flag**
+
+You can use the `--no-ssl` flag directly with any command:
+
+    dainstall --no-ssl docassemble-foobar
+    dauninstall --no-ssl docassemble.foobar
+    dadownload --no-ssl docassemble.foobar
+
+**Option 2: Configuring in `.docassemblecli` file**
+
+You can permanently disable SSL verification for a server by editing
+your `.docassemblecli` configuration file (located in your home
+directory) and setting `verify_ssl: false` for the server entry.
+
+For example, your `.docassemblecli` file might look like this:
+
+```yaml
+- apikey: H3PWMKJOIVAXL4PWUJH3HG7EKPFU5GYT
+  apiurl: https://dev.example.com
+  name: dev.example.com
+  verify_ssl: false
+```
+
+The command-line `--no-ssl` flag takes precedence over the configuration
+file setting.
+
+**Warning:** Disabling SSL verification means that the connection to
+your server will not be encrypted securely, and you could be vulnerable
+to man-in-the-middle attacks. Only use this option for development
+servers on trusted networks, and never for production servers.
+
 ### dauninstall
 
 The `dauninstall` utility uninstalls a package from a **docassemble**
 server.
 
     usage: dauninstall [-h] [--apiurl APIURL] [--apikey APIKEY] [--norestart]
-                       [--server SERVER] [--noconfig] [--debug]
+                       [--server SERVER] [--noconfig] [--no-ssl] [--debug]
                        package
 
     positional arguments:
@@ -273,7 +313,13 @@ server.
       --server SERVER  use a particular server from the .docassemblecli config
                        file
       --noconfig       do not use the .docassemblecli config file
+      --no-ssl         do not verify SSL certificates (insecure, use only for
+                       development)
       --debug          use verbose logging
+
+The `dauninstall` command supports the `--no-ssl` flag and also respects
+the `verify_ssl` setting in your `.docassemblecli` configuration file
+(see the section on "Disabling SSL Certificate Verification" above).
 
 ### dadownload
 
@@ -283,7 +329,7 @@ a **docassemble** server in the same way that `dainstall` does.
 
     usage: dadownload [-h] [--overwrite] [--apiurl APIURL] [--apikey APIKEY]
                       [--server SERVER] [--playground] [--project PROJECT] [--add]
-                      [--noconfig]
+                      [--noconfig] [--no-ssl]
                       [package]
 
     positional arguments:
@@ -301,6 +347,8 @@ a **docassemble** server in the same way that `dainstall` does.
       --project PROJECT  download from a specific project in the Playground
       --add              add another server to the .docassemblecli config file
       --noconfig         do not use the .docassemblecli config file
+      --no-ssl           do not verify SSL certificates (insecure, use only for
+                         development)
 
 For example, if you run `dadownload docassemble.foo` (or `dadownload
 foo`, which will do the same thing), a directory `docassemble-foo`
@@ -321,6 +369,10 @@ code.
 
 By default, `dadownload` will not overwrite any existing files. You
 can override this by specifying `--overwrite`.
+
+The `dadownload` command supports the `--no-ssl` flag and also respects
+the `verify_ssl` setting in your `.docassemblecli` configuration file
+(see the section on "Disabling SSL Certificate Verification" above).
 
 ## Text editors that create hidden and temporary files
 
