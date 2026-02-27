@@ -318,6 +318,36 @@ def name_from_url(url):
     return name
 
 
+def list_servers():
+    dotfile = os.path.join(os.path.expanduser("~"), ".docassemblecli")
+    if os.path.isfile(dotfile):
+        try:
+            with open(dotfile, "r", encoding="utf-8") as fp:
+                env = yaml.load(fp, Loader=yaml.FullLoader)
+        except Exception as err:
+            sys.stderr.write(
+                "Unable to load .docassemblecli file.  "
+                + err.__class__.__name__
+                + ": "
+                + str(err)
+                + "\n"
+            )
+            env = []
+    else:
+        env = []
+    if isinstance(env, dict) and "apikey" in env and "apiurl" in env:
+        env["name"] = name_from_url(str(env["apiurl"]))
+        env = [env]
+    if not isinstance(env, list):
+        sys.stderr.write("Format of .docassemblecli file is not a list; ignoring.\n")
+        env = []
+    return [
+        (item["name"], item["apiurl"])
+        for item in env
+        if isinstance(item, dict) and "name" in item and "apiurl" in item
+    ]
+
+
 def wait_for_server(playground:bool, task_id, apikey, apiurl):
     if playground:
         sys.stdout.write("Waiting for server to restart.")
@@ -395,11 +425,27 @@ def dainstall():
     parser.add_argument("--add", help="add another server to the .docassemblecli config file", action="store_true")
     parser.add_argument("--noconfig", help="do not use the .docassemblecli config file", action="store_true")
     parser.add_argument("--debug", help="use verbose logging", action="store_true")
+    parser.add_argument(
+        "--list-servers",
+        help="list servers in the .docassemblecli config file",
+        action="store_true",
+    )
     args = parser.parse_args()
     if args.norestart and args.force_restart:
         return("The --norestart option can cannot be used with --force-restart.")
     if args.project and not args.playground:
         return("The --project option can only be used with --playground.")
+    if args.list_servers:
+        servers = list_servers()
+        if len(servers) == 0:
+            sys.stdout.write("No servers found in .docassemblecli\n")
+        else:
+            sys.stdout.write("Servers in .docassemblecli:\n")
+            sys.stdout.write("  Server Name:   Server URL\n")
+            sys.stdout.write("  ------------   ----------\n")
+            for name, url in servers:
+                sys.stdout.write(f"  {name}: {url}\n")
+        return
     if not args.add:
         if args.directory is None:
             parser.print_help()

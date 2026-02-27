@@ -8,3 +8,6 @@ newversion.sh
 .history
 .mypy_cache
 */.mypy_cache
+Icon
+.DS_Store
+Icon?

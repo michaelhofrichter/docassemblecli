@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.0.26 - 2026-02-27
+
+### Added
+
+- `--list-servers` argument for the dainstall command.
+
 ## 0.0.23 - 2025-06-12
 
 ### Added
