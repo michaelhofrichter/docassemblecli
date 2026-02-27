@@ -335,8 +335,9 @@ def list_servers():
             env = []
     else:
         env = []
-    if isinstance(env, dict) and "apikey" in env and "apiurl" in env:
-        env["name"] = name_from_url(str(env["apiurl"]))
+    if isinstance(env, dict):
+        if "apiurl" in env and "name" not in env:
+            env["name"] = name_from_url(str(env["apiurl"]))
         env = [env]
     if not isinstance(env, list):
         sys.stderr.write("Format of .docassemblecli file is not a list; ignoring.\n")
