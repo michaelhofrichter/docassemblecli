@@ -8,18 +8,18 @@ import time
 import sys
 import os
 import argparse
-import yaml
-import requests
 import subprocess
-import tomli
-import tomli_w
-from packaging import version as packaging_version
-from watchdog.observers import Observer
-from watchdog.events import RegexMatchingEventHandler
 import asyncio
 import signal
 import hashlib
 from pathlib import Path
+import yaml
+import requests
+import tomli
+import tomli_w
+from packaging import version as packaging_version
+from watchdog.observers import Observer
+from watchdog.events import RegexMatchingEventHandler, FileMovedEvent
 import urllib3
 
 IGNORE_REGEXES = [r'.*/\.git$', r'.*/\.git/.*', r'.*~$', r'.*/\.?\#.*', r'.*/\.?flycheck_.*', r'.*__pycache__.*', r'.*/\.mypy_cache/.*', r'.*\.egg-info.*', r'.*\.py[cod]$', r'.*\$py\.class$', r'.*\.swp$', r'.*/build/.*', r'.*\.tmp$', r'.*\#$', r'.*/\.~.*', r'.*/~.*', r'.*\.swx$', r'.*\.tmp\..*']
@@ -41,6 +41,7 @@ def disable_ssl_warnings():
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         ssl_warnings_disabled = True
 
+
 def checksum_is_same(path):
     path = os.path.abspath(path)
     try:
@@ -52,15 +53,19 @@ def checksum_is_same(path):
         response = True
     return response
 
+
 def debug_log(args, message):
     if args.debug:
         sys.stderr.write(message + "\n")
 
+
 class TerminalException(Exception):
     pass
 
+
 class GracefulExit(SystemExit):
     code = 1
+
 
 class WatchHandler(RegexMatchingEventHandler):
     def __init__(self, queue: asyncio.Queue, loop: asyncio.BaseEventLoop, data: dict, *args, **kwargs):
@@ -70,16 +75,26 @@ class WatchHandler(RegexMatchingEventHandler):
         super().__init__(*args, **kwargs)
 
     def on_any_event(self, event):
-        if event.event_type not in ('opened', 'closed') and not (event.is_directory and event.event_type == 'modified'):
-            debug_log(self._data['args'], "Got event " + repr(event.event_type) + " on " + repr(event.src_path))
-            invalid = False
-            the_path = os.path.abspath(event.src_path)
-            for comparison_path in self._data['to_ignore']:
-                if the_path.startswith(comparison_path):
-                    invalid = True
+        if event.event_type not in ('opened', 'closed', 'closed_no_write') and not (event.is_directory and event.event_type == 'modified'):
+            files_to_check = [event.src_path, event.dest_path] if isinstance(event, FileMovedEvent) else [event.src_path]
+            for the_file in files_to_check:
+                the_path = os.path.abspath(the_file)
+                invalid = False
+                for pat in self._data['ignore_regexes']:
+                    if re.match(pat, the_path):
+                        invalid = True
+                        break
+                if invalid:
+                    continue
+                debug_log(self._data['args'], "Got event " + repr(event.event_type) + " on " + repr(the_file))
+                for comparison_path in self._data['to_ignore']:
+                    if the_path.startswith(comparison_path):
+                        invalid = True
+                        break
+                if not invalid:
+                    self._loop.call_soon_threadsafe(self._queue.put_nowait, {'event_type': event.event_type, 'is_directory': event.is_directory, 'src_path': the_path, 'time': time.time()})
                     break
-            if not invalid:
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, {'event_type': event.event_type, 'is_directory': event.is_directory, 'src_path': the_path, 'time': time.time()})
+
 
 def update_to_do(queue, to_do):
     try:
@@ -87,6 +102,7 @@ def update_to_do(queue, to_do):
             to_do.append(queue.get_nowait())
     except asyncio.QueueEmpty:
         pass
+
 
 async def handle_event_after_delay(queue, to_do, data):
     global full_install_done
@@ -135,6 +151,8 @@ async def handle_event_after_delay(queue, to_do, data):
                 unduplicated_to_do.append(events['modified'])
             elif 'deleted' in events:
                 unduplicated_to_do.append(events['deleted'])
+            elif 'moved' in events:
+                unduplicated_to_do.append(events['moved'])
         if len(unduplicated_to_do) > 0:
             something_done = True
             if not data['args'].norestart and full_install_done and not data['args'].force_restart and not manual_mode:
@@ -213,8 +231,8 @@ async def handle_event_after_delay(queue, to_do, data):
                                     if r.status_code == 200:
                                         try:
                                             info = r.json()
-                                        except:
-                                            raise TerminalException("Server did not return JSON: " + r.text)
+                                        except Exception as err:
+                                            raise TerminalException("Server did not return JSON: " + r.text) from err
                                         task_id = info['task_id']
                                         success = wait_for_server(True, task_id, data['apikey'], data['apiurl'], data['verify_ssl'])
                                         if not success:
@@ -264,9 +282,11 @@ async def handle_event_after_delay(queue, to_do, data):
         sys.stdout.write("Done.\n")
         sys.stdout.flush()
 
+
 async def add_manual_event_to_queue(loop, queue):
     await asyncio.sleep(0.01)
     loop.call_soon_threadsafe(queue.put_nowait, {'event_type': 'manual', 'is_directory': False, 'src_path': '', 'time': time.time()})
+
 
 async def wait_for_item_in_queue(queue, data):
     while True:
@@ -274,10 +294,11 @@ async def wait_for_item_in_queue(queue, data):
         asyncio.create_task(handle_event_after_delay(queue, [first_item], data))
         await queue.join()
 
+
 def watch(path: Path, queue: asyncio.Queue, loop: asyncio.BaseEventLoop,
           data: dict, recursive: bool = False) -> None:
     global observer
-    handler = WatchHandler(queue, loop, data, ignore_regexes=data['ignore_regexes'])
+    handler = WatchHandler(queue, loop, data)
     observer = Observer()
     observer.schedule(handler, str(path), recursive=recursive)
     observer.start()
@@ -443,9 +464,9 @@ def dainstall():
     )
     args = parser.parse_args()
     if args.norestart and args.force_restart:
-        return("The --norestart option can cannot be used with --force-restart.")
+        return "The --norestart option can cannot be used with --force-restart."
     if args.project and not args.playground:
-        return("The --project option can only be used with --playground.")
+        return "The --project option can only be used with --playground."
     if args.list_servers:
         servers = list_servers()
         if len(servers) == 0:
@@ -460,19 +481,19 @@ def dainstall():
             sys.stdout.write(f"  {'-' * max_name_len}  |  {'-' * max_url_len}\n")
             for name, url in servers:
                 sys.stdout.write(f"  {name:<{max_name_len}}  |  {url:<{max_url_len}}\n")
-        return
+        return 0
     if not args.add:
         if args.directory is None:
             parser.print_help()
-            return(1)
+            return 1
         if not os.path.isdir(args.directory):
-            return(args.directory + " could not be found.")
+            return args.directory + " could not be found."
         if not (os.path.isfile(os.path.join(args.directory, 'setup.py')) or os.path.isfile(os.path.join(args.directory, 'setup.cfg')) or os.path.isfile(os.path.join(args.directory, 'pyproject.toml'))):
-            return(args.directory + " does not contain a setup.py, setup.cfg, or pyproject.toml file, so it is not the directory of a Python package.")
+            return args.directory + " does not contain a setup.py, setup.cfg, or pyproject.toml file, so it is not the directory of a Python package."
     used_input = False
     if args.noconfig:
         if args.add:
-            return("Using --add is not compatible with --noconfig.  Exiting.")
+            return "Using --add is not compatible with --noconfig.  Exiting."
         env = []
     else:
         if os.path.isfile(dotfile):
@@ -503,12 +524,12 @@ def dainstall():
         add_or_update_env(env, apiurl, apikey)
         if save_dotfile(dotfile, env):
             sys.stdout.write("Saved base URL and API key to .docassemblecli as server " + name_from_url(apiurl) + "\n")
-        return(0)
+        return 0
     if args.server:
         try:
             selected_env = select_server(env, args.server)
         except TerminalException as err:
-            return(str(err))
+            return str(err)
     elif len(env) > 0:
         selected_env = env[0]
     else:
@@ -523,7 +544,7 @@ def dainstall():
         used_input = True
         apiurl = input('Base URL of your docassemble server (e.g., https://da.example.com): ')
     if not re.search(r'^https?://[^\s]+$', apiurl):
-        return("Invalid API url " + apiurl)
+        return "Invalid API url " + apiurl
     apiurl = re.sub(r'/+$', '', apiurl)
     if args.apikey:
         apikey = args.apikey
@@ -560,7 +581,7 @@ def dainstall():
     try:
         test_connection(args.playground, apiurl, apikey, verify_ssl)
     except Exception as e:
-        return("Unable to connect to server. " + str(e))
+        return "Unable to connect to server. " + str(e)
     if args.watch:
         data = {"args": args, "apikey": apikey, "apiurl": apiurl, "verify_ssl": verify_ssl, "to_ignore": [os.path.abspath(os.path.join(args.directory, item)) for item in to_ignore], 'ignore_regexes': IGNORE_REGEXES, 'trim': 1 + len(os.path.abspath(args.directory))}
         # if args.playground:
@@ -595,12 +616,12 @@ def dainstall():
                 observer.stop()
             loop.close()
         sys.stdout.write("\n")
-        return(0)
+        return 0
     try:
         do_install(args, apikey, apiurl, to_ignore, verify_ssl)
     except TerminalException as err:
-        return(str(err))
-    return(0)
+        return str(err)
+    return 0
 
 
 def dauninstall():
@@ -639,7 +660,7 @@ def dauninstall():
         try:
             selected_env = select_server(env, args.server)
         except TerminalException as err:
-            return(str(err))
+            return str(err)
     elif len(env) > 0:
         selected_env = env[0]
     else:
@@ -654,7 +675,7 @@ def dauninstall():
         used_input = True
         apiurl = input('Base URL of your docassemble server (e.g., https://da.example.com): ')
     if not re.search(r'^https?://[^\s]+$', apiurl):
-        return("Invalid API url " + apiurl)
+        return "Invalid API url " + apiurl
     apiurl = re.sub(r'/+$', '', apiurl)
     if args.apikey:
         apikey = args.apikey
@@ -679,7 +700,7 @@ def dauninstall():
     try:
         test_connection(False, apiurl, apikey, verify_ssl)
     except Exception as e:
-        return("Unable to connect to server. " + str(e))
+        return "Unable to connect to server. " + str(e)
     data = {'package': args.package}
     if args.norestart:
         data['restart'] = '0'
@@ -692,8 +713,9 @@ def dauninstall():
         if wait_for_server(False, task_id, apikey, apiurl, verify_ssl):
             sys.stdout.write("\nUninstalled.\n")
     except TerminalException as err:
-        return(str(err))
-    return(0)
+        return str(err)
+    return 0
+
 
 def test_connection(playground, apiurl, apikey, verify_ssl=True):
     general_test_response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
@@ -709,151 +731,159 @@ def test_connection(playground, apiurl, apikey, verify_ssl=True):
     return
 
 def do_install(args, apikey, apiurl, to_ignore, verify_ssl=True):
-    archive = tempfile.NamedTemporaryFile(suffix=".zip")
-    zf = zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode='w')
-    root_directory = None
-    has_python_files = False
-    this_package_name = None
-    dependencies = {}
-    for root, dirs, files in os.walk(args.directory, topdown=True):
-        adjusted_root = os.sep.join(root.split(os.sep)[1:])
-        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith('flycheck_') and not d.endswith('.egg-info') and os.path.join(adjusted_root, d) not in to_ignore]
-        if root_directory is None and ('setup.py' in files or 'setup.cfg' in files or 'pyproject.toml' in files):
-            root_directory = root
-            if 'pyproject.toml' in files:
-                with open(os.path.join(root, 'pyproject.toml'), 'rb') as fp:
-                    data = tomli.load(fp)
-                    if 'project' not in data:
-                        raise TerminalException("The pyproject.toml file did not contain a project section")
-                    if 'name' not in data['project']:
-                        raise TerminalException("The pyproject.toml file did not contain the package name")
-                    this_package_name = data['project']['name']
-                    if 'dependencies' in data['project'] and isinstance(data['project']['dependencies'], list):
-                        for dependency_string in data['project']['dependencies']:
-                            mm = re.search(r'(.*)(<=|>=|==|<|>)(.*)', dependency_string)
-                            if mm:
-                                dependencies[mm.group(1).strip()] = {'installed': False, 'operator': mm.group(2), 'version': mm.group(3).strip()}
-                            else:
-                                dependencies[dependency_string] = {'installed': False, 'operator': None, 'version': None}
-            if 'setup.py' in files:
-                with open(os.path.join(root, 'setup.py'), 'r', encoding='utf-8') as fp:
-                    setup_text = fp.read()
-                    m = re.search(r'setup\(.*\bname=(["\'])(.*?)(["\'])', setup_text)
-                    if m and m.group(1) == m.group(3):
-                        this_package_name = m.group(2).strip()
-                    m = re.search(r'setup\(.*install_requires=\[(.*?)\]', setup_text, flags=re.DOTALL)
-                    if m:
-                        for package_text in m.group(1).split(','):
-                            package_name = package_text.strip()
-                            if len(package_name) >= 3 and package_name[0] == package_name[-1] and package_name[0] in ("'", '"'):
-                                package_name = package_name[1:-1]
-                                mm = re.search(r'(.*)(<=|>=|==|<|>)(.*)', package_name)
-                                if mm:
-                                    dependencies[mm.group(1).strip()] = {'installed': False, 'operator': mm.group(2), 'version': mm.group(3).strip()}
-                                else:
-                                    dependencies[package_name] = {'installed': False, 'operator': None, 'version': None}
-        for the_file in files:
-            if the_file.endswith('~') or the_file.endswith('.pyc') or the_file.endswith('.swp') or the_file.startswith('#') or the_file.startswith('.#') or the_file.startswith('.flycheck_') or (the_file == '.gitignore' and root_directory == root) or os.path.join(adjusted_root, the_file) in to_ignore:
-                continue
-            if not has_python_files and the_file.endswith('.py') and not (the_file in ('setup.py', 'setup.cfg', 'pyproject.toml') and root == root_directory) and the_file != '__init__.py':
-                has_python_files = True
-            if args.watch:
-                checksum_is_same(os.path.join(root, the_file))
-            zf.write(os.path.join(root, the_file), os.path.relpath(os.path.join(root, the_file), os.path.join(args.directory, '..')))
-    zf.close()
-    archive.seek(0)
-    if args.norestart:
-        should_restart = False
-    elif args.force_restart or has_python_files:
-        should_restart = True
-    elif len(dependencies) > 0 or this_package_name:
-        r = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-        if r.status_code != 200:
-            raise TerminalException("/api/package returned " + str(r.status_code) + ": " + r.text)
-        installed_packages = r.json()
-        already_installed = False
-        for package_info in installed_packages:
-            package_info['alt_name'] = re.sub(r'^docassemble\.', 'docassemble-', package_info['name'])
-            for dependency_name, dependency_info in dependencies.items():
-                if dependency_name in (package_info['name'], package_info['alt_name']):
-                    condition = True
-                    if dependency_info['operator']:
-                        if dependency_info['operator'] == '==':
-                            condition = packaging_version.parse(package_info['version']) == packaging_version.parse(dependency_info['version'])
-                        elif dependency_info['operator'] == '<=':
-                            condition = packaging_version.parse(package_info['version']) <= packaging_version.parse(dependency_info['version'])
-                        elif dependency_info['operator'] == '>=':
-                            condition = packaging_version.parse(package_info['version']) >= packaging_version.parse(dependency_info['version'])
-                        elif dependency_info['operator'] == '<':
-                            condition = packaging_version.parse(package_info['version']) < packaging_version.parse(dependency_info['version'])
-                        elif dependency_info['operator'] == '>':
-                            condition = packaging_version.parse(package_info['version']) > packaging_version.parse(dependency_info['version'])
-                    if condition:
-                        dependency_info['installed'] = True
-            if this_package_name and this_package_name in (package_info['name'], package_info['alt_name']):
-                already_installed = True
-        should_restart = bool((not already_installed and len(dependencies) > 0) or not all(item['installed'] for item in dependencies.values()))
-    else:
-        should_restart = True
-    data = {}
-    if not should_restart:
-        data['restart'] = '0'
-    if args.playground:
-        if args.project and args.project != 'default':
-            data['project'] = args.project
-        project_endpoint = apiurl + '/api/playground/project'
-        project_list = requests.get(project_endpoint, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-        if project_list.status_code == 200:
-            if not args.project in project_list:
-                try:
-                    requests.post(project_endpoint, data={'project': args.project}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-                except:
-                    raise TerminalException("create project POST failed")
+    archive_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".zip", mode='w+b', delete=False) as archive:
+            archive_path = archive.name
+            with zipfile.ZipFile(archive, compression=zipfile.ZIP_DEFLATED, mode='w') as zf:
+                root_directory = None
+                has_python_files = False
+                this_package_name = None
+                dependencies = {}
+                for root, dirs, files in os.walk(args.directory, topdown=True):
+                    adjusted_root = os.sep.join(root.split(os.sep)[1:])
+                    dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith('flycheck_') and not d.endswith('.egg-info') and os.path.join(adjusted_root, d) not in to_ignore]
+                    if root_directory is None and ('setup.py' in files or 'setup.cfg' in files or 'pyproject.toml' in files):
+                        root_directory = root
+                        if 'pyproject.toml' in files:
+                            with open(os.path.join(root, 'pyproject.toml'), 'rb') as fp:
+                                data = tomli.load(fp)
+                                if 'project' not in data:
+                                    raise TerminalException("The pyproject.toml file did not contain a project section")
+                                if 'name' not in data['project']:
+                                    raise TerminalException("The pyproject.toml file did not contain the package name")
+                                this_package_name = data['project']['name']
+                                if 'dependencies' in data['project'] and isinstance(data['project']['dependencies'], list):
+                                    for dependency_string in data['project']['dependencies']:
+                                        mm = re.search(r'(.*)(<=|>=|==|<|>)(.*)', dependency_string)
+                                        if mm:
+                                            dependencies[mm.group(1).strip()] = {'installed': False, 'operator': mm.group(2), 'version': mm.group(3).strip()}
+                                        else:
+                                            dependencies[dependency_string] = {'installed': False, 'operator': None, 'version': None}
+                        if 'setup.py' in files:
+                            with open(os.path.join(root, 'setup.py'), 'r', encoding='utf-8') as fp:
+                                setup_text = fp.read()
+                                m = re.search(r'setup\(.*\bname=(["\'])(.*?)(["\'])', setup_text)
+                                if m and m.group(1) == m.group(3):
+                                    this_package_name = m.group(2).strip()
+                                m = re.search(r'setup\(.*install_requires=\[(.*?)\]', setup_text, flags=re.DOTALL)
+                                if m:
+                                    for package_text in m.group(1).split(','):
+                                        package_name = package_text.strip()
+                                        if len(package_name) >= 3 and package_name[0] == package_name[-1] and package_name[0] in ("'", '"'):
+                                            package_name = package_name[1:-1]
+                                            mm = re.search(r'(.*)(<=|>=|==|<|>)(.*)', package_name)
+                                            if mm:
+                                                dependencies[mm.group(1).strip()] = {'installed': False, 'operator': mm.group(2), 'version': mm.group(3).strip()}
+                                            else:
+                                                dependencies[package_name] = {'installed': False, 'operator': None, 'version': None}
+                    for the_file in files:
+                        if the_file.endswith('~') or the_file.endswith('.pyc') or the_file.endswith('.swp') or the_file.startswith('#') or the_file.startswith('.#') or the_file.startswith('.flycheck_') or (the_file == '.gitignore' and root_directory == root) or os.path.join(adjusted_root, the_file) in to_ignore:
+                            continue
+                        if not has_python_files and the_file.endswith('.py') and not (the_file in ('setup.py', 'setup.cfg', 'pyproject.toml') and root == root_directory) and the_file != '__init__.py':
+                            has_python_files = True
+                        if args.watch:
+                            checksum_is_same(os.path.join(root, the_file))
+                        zf.write(os.path.join(root, the_file), os.path.relpath(os.path.join(root, the_file), os.path.join(args.directory, '..')))
+        if args.norestart:
+            should_restart = False
+        elif args.force_restart or has_python_files:
+            should_restart = True
+        elif len(dependencies) > 0 or this_package_name:
+            r = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+            if r.status_code != 200:
+                raise TerminalException("/api/package returned " + str(r.status_code) + ": " + r.text)
+            installed_packages = r.json()
+            already_installed = False
+            for package_info in installed_packages:
+                package_info['alt_name'] = re.sub(r'^docassemble\.', 'docassemble-', package_info['name'])
+                for dependency_name, dependency_info in dependencies.items():
+                    if dependency_name in (package_info['name'], package_info['alt_name']):
+                        condition = True
+                        if dependency_info['operator']:
+                            if dependency_info['operator'] == '==':
+                                condition = packaging_version.parse(package_info['version']) == packaging_version.parse(dependency_info['version'])
+                            elif dependency_info['operator'] == '<=':
+                                condition = packaging_version.parse(package_info['version']) <= packaging_version.parse(dependency_info['version'])
+                            elif dependency_info['operator'] == '>=':
+                                condition = packaging_version.parse(package_info['version']) >= packaging_version.parse(dependency_info['version'])
+                            elif dependency_info['operator'] == '<':
+                                condition = packaging_version.parse(package_info['version']) < packaging_version.parse(dependency_info['version'])
+                            elif dependency_info['operator'] == '>':
+                                condition = packaging_version.parse(package_info['version']) > packaging_version.parse(dependency_info['version'])
+                        if condition:
+                            dependency_info['installed'] = True
+                if this_package_name and this_package_name in (package_info['name'], package_info['alt_name']):
+                    already_installed = True
+            should_restart = bool((not already_installed and len(dependencies) > 0) or not all(item['installed'] for item in dependencies.values()))
         else:
-            sys.stdout.write("\n")
-            raise TerminalException("playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text)
-        r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-        if r.status_code == 400:
-            try:
-                error_message = r.json()
-            except:
-                error_message = ''
-            if 'project' not in data or error_message != 'Invalid project.':
-                raise TerminalException('playground_install POST returned ' + str(r.status_code) + ": " + r.text)
-            r = requests.post(apiurl + '/api/playground/project', data={'project': data['project']}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-            if r.status_code != 204:
-                raise TerminalException("needed to create playground project but POST to api/playground/project returned " + str(r.status_code) + ": " + r.text)
-            archive.seek(0)
-            r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-        if r.status_code == 200:
-            try:
-                info = r.json()
-            except:
-                raise TerminalException(r.text)
-            task_id = info['task_id']
-            success = wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl)
-        elif r.status_code == 204:
-            success = True
-        else:
-            sys.stdout.write("\n")
-            raise TerminalException("playground_install POST returned " + str(r.status_code) + ": " + r.text)
-        if success:
-            sys.stdout.write("\nInstalled.\n")
-            sys.stdout.flush()
-        else:
-            raise TerminalException("\nInstall failed\n")
-    else:
-        r = requests.post(apiurl + '/api/package', data=data, files={'zip': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-        if r.status_code != 200:
-            raise TerminalException("package POST returned " + str(r.status_code) + ": " + r.text)
-        info = r.json()
-        task_id = info['task_id']
-        if wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl):
-            sys.stdout.write("\nInstalled.\n")
+            should_restart = True
+        data = {}
         if not should_restart:
-            r = requests.post(apiurl + '/api/clear_cache', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-            if r.status_code != 204:
-                raise TerminalException("clear_cache returned " + str(r.status_code) + ": " + r.text)
+            data['restart'] = '0'
+        with open(archive_path, 'rb') as archive:
+            if args.playground:
+                if args.project and args.project != 'default':
+                    data['project'] = args.project
+                project_endpoint = apiurl + '/api/playground/project'
+                project_list = requests.get(project_endpoint, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                if project_list.status_code == 200:
+                    if args.project not in project_list:
+                        try:
+                            requests.post(project_endpoint, data={'project': args.project}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                        except Exception as err:
+                            raise TerminalException("create project POST failed") from err
+                else:
+                    sys.stdout.write("\n")
+                    raise TerminalException("playground list of projects GET returned " + str(project_list.status_code) + ": " + project_list.text)
+                r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                if r.status_code == 400:
+                    try:
+                        error_message = r.json()
+                    except:
+                        error_message = ''
+                    if 'project' not in data or error_message != 'Invalid project.':
+                        raise TerminalException('playground_install POST returned ' + str(r.status_code) + ": " + r.text)
+                    r = requests.post(apiurl + '/api/playground/project', data={'project': data['project']}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                    if r.status_code != 204:
+                        raise TerminalException("needed to create playground project but POST to api/playground/project returned " + str(r.status_code) + ": " + r.text)
+                    archive.seek(0)
+                    r = requests.post(apiurl + '/api/playground_install', data=data, files={'file': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                if r.status_code == 200:
+                    try:
+                        info = r.json()
+                    except Exception as err:
+                        raise TerminalException(r.text) from err
+                    task_id = info['task_id']
+                    success = wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl)
+                elif r.status_code == 204:
+                    success = True
+                else:
+                    sys.stdout.write("\n")
+                    raise TerminalException("playground_install POST returned " + str(r.status_code) + ": " + r.text)
+                if success:
+                    sys.stdout.write("\nInstalled.\n")
+                    sys.stdout.flush()
+                else:
+                    raise TerminalException("\nInstall failed\n")
+            else:
+                r = requests.post(apiurl + '/api/package', data=data, files={'zip': archive}, headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                if r.status_code != 200:
+                    raise TerminalException("package POST returned " + str(r.status_code) + ": " + r.text)
+                info = r.json()
+                task_id = info['task_id']
+                if wait_for_server(args.playground, task_id, apikey, apiurl, verify_ssl):
+                    sys.stdout.write("\nInstalled.\n")
+                if not should_restart:
+                    r = requests.post(apiurl + '/api/clear_cache', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                    if r.status_code != 204:
+                        raise TerminalException("clear_cache returned " + str(r.status_code) + ": " + r.text)
+    except Exception:
+        if archive_path and os.path.exists(archive_path):
+            os.unlink(archive_path)
+        raise
+    if archive_path and os.path.exists(archive_path):
+        os.unlink(archive_path)
 
 
 def dacreate():
@@ -872,7 +902,7 @@ def dacreate():
         pkgname = input('Name of the package you want to create (e.g., childsupport): ')
     pkgname = re.sub(r'\s', '', pkgname)
     if not pkgname:
-        return("The package name you entered is invalid.")
+        return "The package name you entered is invalid."
     pkgname = re.sub(r'^docassemble[\-\.]', '', pkgname, flags=re.IGNORECASE)
     if args.output:
         packagedir = args.output
@@ -880,10 +910,10 @@ def dacreate():
         packagedir = 'docassemble-' + pkgname
     if os.path.exists(packagedir):
         if not os.path.isdir(packagedir):
-            return("Cannot create the directory " + packagedir + " because the path already exists.")
+            return "Cannot create the directory " + packagedir + " because the path already exists."
         dir_listing = list(os.listdir(packagedir))
         if 'setup.py' in dir_listing or 'setup.cfg' in dir_listing or 'pyproject.toml' in dir_listing:
-            return("The directory " + packagedir + " already has a package in it.")
+            return "The directory " + packagedir + " already has a package in it."
     else:
         os.makedirs(packagedir, exist_ok=True)
     developer_name = args.developer_name
@@ -1104,7 +1134,8 @@ def find_package_data(where='.', package='', exclude=standard_exclude, exclude_d
         the_file.write(pyprojecttoml)
     with open(os.path.join(packagedir, 'docassemble', pkgname, '__init__.py'), 'w', encoding='utf-8') as the_file:
         the_file.write("__version__ = " + repr(version) + "\n")
-    return(0)
+    return 0
+
 
 def dadownload():
     dotfile = os.path.join(os.path.expanduser('~'), '.docassemblecli')
@@ -1121,15 +1152,15 @@ def dadownload():
     parser.add_argument("--no-ssl", help="do not verify SSL certificates (insecure, use only for development)", action="store_true", dest="no_ssl")
     args = parser.parse_args()
     if args.project and not args.playground:
-        return("The --project option can only be used with --playground.")
+        return "The --project option can only be used with --playground."
     if not args.add:
         if args.package is None:
             parser.print_help()
-            return(1)
+            return 1
     used_input = False
     if args.noconfig:
         if args.add:
-            return("Using --add is not compatible with --noconfig.  Exiting.")
+            return "Using --add is not compatible with --noconfig.  Exiting."
         env = []
     else:
         if os.path.isfile(dotfile):
@@ -1160,12 +1191,12 @@ def dadownload():
         add_or_update_env(env, apiurl, apikey)
         if save_dotfile(dotfile, env):
             sys.stdout.write("Saved base URL and API key to .docassemblecli as server " + name_from_url(apiurl) + "\n")
-        return(0)
+        return 0
     if args.server:
         try:
             selected_env = select_server(env, args.server)
         except TerminalException as err:
-            return(str(err))
+            return str(err)
     elif len(env) > 0:
         selected_env = env[0]
     else:
@@ -1180,7 +1211,7 @@ def dadownload():
         used_input = True
         apiurl = input('Base URL of your docassemble server (e.g., https://da.example.com): ')
     if not re.search(r'^https?://[^\s]+$', apiurl):
-        return("Invalid API url " + apiurl)
+        return "Invalid API url " + apiurl
     apiurl = re.sub(r'/+$', '', apiurl)
     if args.apikey:
         apikey = args.apikey
@@ -1206,58 +1237,58 @@ def dadownload():
     if not package_name.startswith('docassemble.'):
         package_name = 'docassemble.' + package_name
     package_file_name = re.sub(r'docassemble\.', 'docassemble-', package_name)
-    archive = tempfile.NamedTemporaryFile(suffix=".zip")
-    if args.playground:
-        params = {'folder': 'packages', 'filename': package_name}
-        if args.project:
-            params['project'] = args.project
-        try:
-            with requests.get(apiurl + '/api/playground', params=params, stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
-                if r.status_code == 404:
-                    return("Package not found.")
-                r.raise_for_status()
-                with open(archive.name, 'wb') as fp:
-                    for chunk in r.iter_content(8192):
-                        fp.write(chunk)
-        except requests.exceptions.HTTPError as err:
-            return("Error downloading package: " + str(err))
-    else:
-        zip_file_number = None
-        found = False
-        try:
-            response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
-            assert response.status_code == 200
-        except:
-            return("Unable to connect to server.")
-        for item in response.json():
-            if item['name'] == package_name:
-                found = True
-                if 'zip_file_number' in item:
-                    zip_file_number = item['zip_file_number']
-                break
-        if found is False:
-            return("Package not installed.")
-        if zip_file_number is None:
-            return("Package installed but is not downloadable.")
-        try:
-            with requests.get(apiurl + '/api/file/' + str(zip_file_number), stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
-                r.raise_for_status()
-                with open(archive.name, 'wb') as fp:
-                    for chunk in r.iter_content(8192):
-                        fp.write(chunk)
-        except requests.exceptions.HTTPError as err:
-            sys.exit("Error downloading package: " + str(err))
-    with zipfile.ZipFile(archive.name, mode='r') as zf:
-        if not args.overwrite:
+    with tempfile.NamedTemporaryFile(suffix=".zip", mode='w+b') as archive:
+        if args.playground:
+            params = {'folder': 'packages', 'filename': package_name}
+            if args.project:
+                params['project'] = args.project
+            try:
+                with requests.get(apiurl + '/api/playground', params=params, stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
+                    if r.status_code == 404:
+                        return "Package not found."
+                    r.raise_for_status()
+                    with open(archive.name, 'wb') as fp:
+                        for chunk in r.iter_content(8192):
+                            fp.write(chunk)
+            except requests.exceptions.HTTPError as err:
+                return "Error downloading package: " + str(err)
+        else:
+            zip_file_number = None
+            found = False
+            try:
+                response = requests.get(apiurl + '/api/package', headers={'X-API-Key': apikey}, timeout=50, verify=verify_ssl)
+                assert response.status_code == 200
+            except:
+                return "Unable to connect to server."
+            for item in response.json():
+                if item['name'] == package_name:
+                    found = True
+                    if 'zip_file_number' in item:
+                        zip_file_number = item['zip_file_number']
+                    break
+            if found is False:
+                return "Package not installed."
+            if zip_file_number is None:
+                return "Package installed but is not downloadable."
+            try:
+                with requests.get(apiurl + '/api/file/' + str(zip_file_number), stream=True, timeout=60, headers={'X-API-Key': apikey}, verify=verify_ssl) as r:
+                    r.raise_for_status()
+                    with open(archive.name, 'wb') as fp:
+                        for chunk in r.iter_content(8192):
+                            fp.write(chunk)
+            except requests.exceptions.HTTPError as err:
+                sys.exit("Error downloading package: " + str(err))
+        with zipfile.ZipFile(archive.name, mode='r') as zf:
+            if not args.overwrite:
+                for file_info in zf.infolist():
+                    file_path = file_info.filename
+                    if os.path.exists(file_path):
+                        return f"Unpacking the package here would overwrite existing files ({file_path}). Use --overwrite if you want to overwrite existing files."
             for file_info in zf.infolist():
                 file_path = file_info.filename
-                if os.path.exists(file_path):
-                    return(f"Unpacking the package here would overwrite existing files ({file_path}). Use --overwrite if you want to overwrite existing files.")
-        for file_info in zf.infolist():
-            file_path = file_info.filename
-            try:
-                zf.extract(file_info, path=os.getcwd())
-            except Exception as e:
-                print(f"Error extracting '{file_path}': {e}")
+                try:
+                    zf.extract(file_info, path=os.getcwd())
+                except Exception as e:
+                    print(f"Error extracting '{file_path}': {e}")
     print(f"Unpacked {package_file_name}.")
-    return(0)
+    return 0

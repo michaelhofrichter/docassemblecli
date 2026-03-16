@@ -1,16 +1,37 @@
 # Change Log
 
-## 0.0.27 - 2026-05-07
-
-### Fixed
-
-- Update regex matching for 3.14 syntax.
-
-## 0.0.26 - 2026-02-27
+## 0.0.26 - 2026-05-16
 
 ### Added
 
-- `--list-servers` argument for the dainstall command.
+- The `--list-servers` argument.
+- The `--no-ssl` argument.
+
+### Changed
+
+- `dainstall --watch` now listens for file move events.
+
+### Fixed
+
+- In the new version of `requests`, a `NamedTemporaryFile` is not a
+  substitute for an open file handle.
+
+## 0.0.25 - 2025-11-01
+
+### Changed
+
+- Added `*.tmp.*` files to the list of files to ignore.
+
+### Fixed
+
+- Issue regarding license checks
+
+## 0.0.24 - 2025-10-05
+
+### Fixed
+
+- Improved license check
+- Adapted to **docassemble** servers that return a 502 error while restarting.
 
 ## 0.0.23 - 2025-06-12
 
