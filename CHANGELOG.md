@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.0.27 - 2026-05-07
+
+### Fixed
+
+- Update regex matching for 3.14 syntax.
+
 ## 0.0.26 - 2026-02-27
 
 ### Added
