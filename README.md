@@ -148,7 +148,7 @@ You can run `dainstall --help` to get more information about how
     usage: dainstall [-h] [--apiurl APIURL] [--apikey APIKEY] [--norestart]
                      [--watch] [--force-restart] [--server SERVER] [--playground]
                      [--project PROJECT] [--add] [--noconfig] [--no-ssl] [--debug]
-                     [directory]
+                     [--list-servers] [directory]
 
     positional arguments:
       directory
@@ -173,6 +173,8 @@ You can run `dainstall --help` to get more information about how
       --no-ssl           do not verify SSL certificates (insecure, use only for
                          development)
       --debug            use verbose logging
+      --list-servers     Lists out the names and urls of all servers in the 
+                         .docassemblecli configuration file
 
 For example, you might want to pass the URL and API key in the command
 itself:
